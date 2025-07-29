@@ -174,6 +174,23 @@ def get_conversational_chain():
 
 # --- Flask API Endpoint ---
 
+@app.route("/", methods=["GET"])
+def health_check():
+    """Health check endpoint for deployment platforms."""
+    return jsonify({
+        "status": "healthy",
+        "message": "HackRx RAG API is running",
+        "endpoint": "/hackrx/run"
+    })
+
+@app.route("/test", methods=["GET"])
+def test_endpoint():
+    """Test endpoint to verify the app is working."""
+    return jsonify({
+        "message": "HackRx API is working!",
+        "timestamp": time.time()
+    })
+
 @app.route("/hackrx/run", methods=["POST"])
 def process_request():
     """
