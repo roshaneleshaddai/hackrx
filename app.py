@@ -276,4 +276,7 @@ if __name__ == "__main__":
     # Ensure the Mistral API key is set
     if not os.getenv("MISTRAL_API_KEY"):
         raise ValueError("MISTRAL_API_KEY environment variable not set. Please create a .env file with your Mistral API key.")
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    
+    # Get port from environment variable (for cloud platforms)
+    port = int(os.getenv("PORT", 8000))
+    app.run(host="0.0.0.0", port=port, debug=False)
