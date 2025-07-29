@@ -11,14 +11,6 @@
       "src": "/(.*)",
       "dest": "app.py"
     }
-  ],
-  "ignore": [
-    "myenv/**",
-    "*.pyc",
-    "__pycache__/**",
-    ".env",
-    ".git/**",
-    "*.log"
   ]
 }
   

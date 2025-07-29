@@ -1,0 +1,7 @@
+myenv/
+*.pyc
+__pycache__/
+.env
+.git/
+*.log
+temp_*.pdf 
