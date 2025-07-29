@@ -225,3 +225,4 @@ faiss_index/
 *.bak
 *.backup
 *~ 
+.vercel
