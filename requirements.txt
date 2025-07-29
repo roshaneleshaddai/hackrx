@@ -1,0 +1,9 @@
+flask
+langchain
+langchain-google-genai
+langchain-mistralai
+langchain_community
+pypdf
+faiss-cpu
+python-dotenv
+requests
