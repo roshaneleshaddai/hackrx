@@ -151,17 +151,23 @@ def get_vector_store(text_chunks: list):
 def get_conversational_chain():
     """Creates a question-answering chain with a custom prompt and a Mistral LLM."""
     prompt_template = """
-    Answer the question based on the provided context. Keep your answer concise and relevant.
-    If the answer is not in the provided context, just say, "The answer is not available in the provided document".
-    Do not provide a wrong answer.
+ You are an expert insurance policy analyst. Answer the question based strictly on the information provided in the context.
 
-    Context:
-    {context}
+- Provide clear, formal, and concise answers suitable for an insurance policyholder.
+- Use exact policy terms, durations, conditions, and limits mentioned in the context.
+- Include all relevant eligibility criteria, exclusions, and sub-limits if applicable.
+- If partial information is available, summarize it accurately without adding assumptions.
+- Only reply "The answer is not available in the provided document." if no relevant information can be found.
+- Do not restate the question or add any unrelated information.
 
-    Question:
-    {question}
+Context:
+{context}
 
-    Answer:
+Question:
+{question}
+
+Answer:
+
     """
     try:
         model = ChatMistralAI(model="mistral-large-latest", temperature=0.3)
