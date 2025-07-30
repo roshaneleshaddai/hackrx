@@ -15,6 +15,20 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from dotenv import load_dotenv
 
+# Import NLTK for sentence tokenization
+try:
+    import nltk
+    from nltk.tokenize import sent_tokenize
+    # Download required NLTK data
+    try:
+        nltk.data.find('tokenizers/punkt')
+    except LookupError:
+        nltk.download('punkt', quiet=True)
+    NLTK_AVAILABLE = True
+except ImportError:
+    NLTK_AVAILABLE = False
+    print("Warning: NLTK not available. Using fallback sentence tokenization.")
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -120,6 +134,57 @@ def generate_simple_answer(question, context):
     else:
         return "The answer is not available in the provided document."
 
+def intelligent_truncate(text, max_words=80):
+    """Intelligently truncate text to max_words while completing sentences."""
+    words = text.split()
+    
+    if len(words) <= max_words:
+        return text
+    
+    # Truncate to max_words
+    truncated_words = words[:max_words]
+    truncated_text = ' '.join(truncated_words)
+    
+    # Use NLTK for proper sentence tokenization if available
+    if NLTK_AVAILABLE:
+        sentences = sent_tokenize(truncated_text)
+    else:
+        # Fallback: simple sentence splitting
+        sentences = re.split(r'[.!?]+', truncated_text)
+        sentences = [s.strip() for s in sentences if s.strip()]
+    
+    # If we have complete sentences, return them
+    if sentences:
+        # Remove the last sentence if it's incomplete (doesn't end with punctuation)
+        if not truncated_text.rstrip().endswith(('.', '!', '?')):
+            if len(sentences) > 1:
+                # Return all but the last sentence
+                return ' '.join(sentences[:-1]).strip()
+            else:
+                # If only one sentence and it's incomplete, try to find a better break point
+                return find_better_break_point(truncated_text, max_words)
+        else:
+            # All sentences are complete
+            return truncated_text
+    
+    return truncated_text
+
+def find_better_break_point(text, max_words):
+    """Find a better break point in the text to avoid cutting mid-sentence."""
+    words = text.split()
+    
+    # Look for natural break points (conjunctions, prepositions)
+    break_indicators = ['and', 'or', 'but', 'however', 'therefore', 'furthermore', 'additionally', 'also', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by']
+    
+    # Start from max_words and work backwards
+    for i in range(max_words - 1, max_words // 2, -1):
+        if i < len(words) and words[i].lower() in break_indicators:
+            # Found a good break point
+            return ' '.join(words[:i]) + '.'
+    
+    # If no good break point found, just truncate and add ellipsis
+    return ' '.join(words[:max_words-1]) + '...'
+
 def post_process_answer(answer):
     """Clean and standardize the AI response for better consistency."""
     if not answer:
@@ -194,6 +259,19 @@ def post_process_answer(answer):
     
     # Clean up any remaining section references in parentheses
     answer = re.sub(r'\([^)]*Section[^)]*\)', '', answer)
+    
+    # Normalize phrasing like "This means" or "It implies" into policyholder-focused summaries
+    answer = re.sub(r'\bThis means that\b', '', answer, flags=re.IGNORECASE)
+    answer = re.sub(r'\bIt implies that\b', '', answer, flags=re.IGNORECASE)
+    answer = re.sub(r'\bThis means\b', '', answer, flags=re.IGNORECASE)
+    answer = re.sub(r'\bIt implies\b', '', answer, flags=re.IGNORECASE)
+    
+    # Start with Yes/No/Summary statement if missing
+    if not answer.lower().startswith(("yes", "no", "a ", "the ", "there is", "coverage", "under", "the policy")):
+        answer = "The policy states that " + answer
+    
+    # Intelligent truncation with sentence completion
+    answer = intelligent_truncate(answer, max_words=80)
     
     # Ensure the answer is a single paragraph
     answer = re.sub(r'\s+', ' ', answer)  # Normalize all whitespace to single spaces
@@ -274,28 +352,23 @@ def get_vector_store(text_chunks: list):
 def get_conversational_chain():
     """Creates a question-answering chain with a custom prompt and a Mistral LLM."""
     prompt_template = """
-You are an expert insurance policy analyst. Answer the question based strictly on the information provided in the context.
+You are an expert insurance policy analyst. Answer the question strictly based on the context below.
 
-**Instructions:**
-- Provide clear, formal, and concise answers suitable for an insurance policyholder
-- Use exact policy terms, durations, conditions, and limits mentioned in the context
-- Include all relevant eligibility criteria, exclusions, and sub-limits if applicable
-- If partial information is available, summarize it accurately without adding assumptions
-- For numerical values, use consistent formatting (e.g., "30 days" not "thirty days")
-- For policy terms, use the exact terminology from the document
-- If a specific limit or condition applies, state it clearly
-- DO NOT use section numbers or references (like "Section 3.1.15")
-- DO NOT use markdown formatting (no **bold** or *italic*)
-- Write responses in a natural, conversational tone as if explaining to a person
-- Make the response as short as possible and a summarized paragraph
+Instructions:
+- Write clearly and concisely, as if explaining to a policyholder
+- Use policy terms, durations, and exact limits as provided in the context
+- Include eligibility criteria, exclusions, and limits if mentioned
+- Do not assume or add any extra information
+- Use numerals for durations and values (e.g., "30 days", not "thirty days")
+- Avoid referencing sections or using any formatting like bold or italic
+- Keep the answer short, direct, and in one summarized paragraph
 
-**Response Format Guidelines:**
-- Start with a direct answer to the question
-- Use simple, clear language without technical jargon
-- Highlight important numbers and time periods
-- Keep responses concise but comprehensive
-- Write as if explaining to a policyholder, not referencing document sections
-- Make the response as short as possible and a summarized paragraph
+Response Style:
+- Start with a direct answer (Yes, No, or short statement)
+- Highlight key durations, conditions, or values
+- Avoid technical jargon or legalese
+- Do not explain common terms like "grace period" or "waiting period"
+- Avoid list format; always return a single paragraph
 
 Context:
 {context}
