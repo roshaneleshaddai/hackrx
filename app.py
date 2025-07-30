@@ -3,7 +3,7 @@ import requests
 import asyncio
 import time
 import re
-import string
+import warnings
 from flask import Flask, request, jsonify
 
 from langchain_community.document_loaders import PyPDFLoader
@@ -18,6 +18,14 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
+# Suppress warnings from Mistral tokenizer
+warnings.filterwarnings("ignore", message=".*could not download mistral tokenizer.*")
+warnings.filterwarnings("ignore", message=".*Falling back to a dummy tokenizer.*")
+
+# Set HF_TOKEN if not already set to prevent tokenizer download warnings
+if not os.getenv("HF_TOKEN"):
+    os.environ["HF_TOKEN"] = "dummy_token"
+
 # Initialize Flask app
 app = Flask(__name__)
 
@@ -26,7 +34,7 @@ BEARER_TOKEN = "3ca0894d22ac6bf6daf7d8323b1e77d69241f8b2810b9bee667a0a14969ffb48
 
 # Rate limiting variables
 last_request_time = 0
-min_request_interval = 1  
+min_request_interval = 1  # Reduced to 1 second for Mistral (better rate limits)
 
 def setup_event_loop():
     """Set up event loop for async operations."""
@@ -112,6 +120,117 @@ def generate_simple_answer(question, context):
     else:
         return "The answer is not available in the provided document."
 
+def post_process_answer(answer):
+    """Clean and standardize the AI response for better consistency."""
+    if not answer:
+        return "No information available in the document."
+    
+    # Remove literal \n characters and replace with actual line breaks
+    answer = answer.replace('\\n', '\n')
+    
+    # Remove markdown formatting
+    answer = re.sub(r'\*\*([^*]+)\*\*', r'\1', answer)  # Remove **bold** formatting
+    answer = re.sub(r'\*([^*]+)\*', r'\1', answer)  # Remove *italic* formatting
+    
+    # Remove section references
+    answer = re.sub(r'Section\s+\d+\.\d+\.\d+', '', answer)  # Remove "Section 3.1.15" etc.
+    answer = re.sub(r'Section\s+\d+\.\d+', '', answer)  # Remove "Section 3.1" etc.
+    answer = re.sub(r'Section\s+\d+', '', answer)  # Remove "Section 3" etc.
+    
+    # Clean up unwanted characters and formatting
+    answer = re.sub(r'\\ni', '', answer)  # Remove \ni
+    answer = re.sub(r'\\n\d+', '', answer)  # Remove \n followed by numbers
+    answer = re.sub(r'\\n\s*[iiv]+\.', '', answer)  # Remove \n followed by roman numerals
+    
+    # Remove all bullet points and convert to paragraph text
+    answer = re.sub(r'^\s*[-•]\s*', '', answer, flags=re.MULTILINE)  # Remove bullet points at start of lines
+    answer = re.sub(r'\s*•\s*', ' ', answer)  # Remove bullet points in middle of text
+    answer = re.sub(r'^\s*\d+\.\s*', '', answer, flags=re.MULTILINE)  # Remove numbered lists
+    answer = re.sub(r'^\s*[iiv]+\.\s*', '', answer, flags=re.MULTILINE)  # Remove roman numerals
+    
+    # Remove extra whitespace and normalize line breaks
+    answer = re.sub(r'\n\s*\n', ' ', answer.strip())  # Convert double line breaks to single space
+    answer = re.sub(r'\n', ' ', answer)  # Convert single line breaks to spaces
+    
+    # Comprehensive number mapping for written numbers to digits
+    number_mapping = {
+        'zero': '0', 'one': '1', 'two': '2', 'three': '3', 'four': '4', 'five': '5',
+        'six': '6', 'seven': '7', 'eight': '8', 'nine': '9', 'ten': '10',
+        'eleven': '11', 'twelve': '12', 'thirteen': '13', 'fourteen': '14', 'fifteen': '15',
+        'sixteen': '16', 'seventeen': '17', 'eighteen': '18', 'nineteen': '19', 'twenty': '20',
+        'twenty-one': '21', 'twenty-two': '22', 'twenty-three': '23', 'twenty-four': '24',
+        'twenty-five': '25', 'twenty-six': '26', 'twenty-seven': '27', 'twenty-eight': '28',
+        'twenty-nine': '29', 'thirty': '30', 'thirty-one': '31', 'thirty-two': '32',
+        'thirty-three': '33', 'thirty-four': '34', 'thirty-five': '35', 'thirty-six': '36',
+        'forty': '40', 'forty-five': '45', 'fifty': '50', 'sixty': '60', 'seventy': '70',
+        'eighty': '80', 'ninety': '90', 'hundred': '100'
+    }
+    
+    # Convert written numbers to digits
+    for word, number in number_mapping.items():
+        # Match whole words only to avoid partial replacements
+        answer = re.sub(rf'\b{word}\b', number, answer, flags=re.IGNORECASE)
+    
+    # Handle special cases like "thirty-six (36)" -> "36"
+    answer = re.sub(r'(\w+)\s*\((\d+)\)', r'\2', answer)
+    
+    # Standardize time period formatting
+    answer = re.sub(r'(\d+)\s+months?\s+of\s+continuous\s+coverage', r'\1 months of continuous coverage', answer)
+    answer = re.sub(r'(\d+)\s+days?', r'\1 days', answer)
+    answer = re.sub(r'(\d+)\s+years?', r'\1 years', answer)
+    
+    # Remove any trailing "(Note: Using fallback mode)" messages
+    answer = re.sub(r'\s*\(Note: Using fallback mode[^)]*\)\s*$', '', answer)
+    
+    # Clean up extra spaces around punctuation
+    answer = re.sub(r'\s+([.,;:])', r'\1', answer)
+    
+    # Standardize age references (e.g., "eighteen (18) years" -> "18 years")
+    answer = re.sub(r'(\w+)\s*\((\d+)\)\s*years?\s+of\s+age', r'\2 years of age', answer, flags=re.IGNORECASE)
+    
+    # Final cleanup of any remaining unwanted characters
+    answer = re.sub(r'\\[a-zA-Z0-9]+', '', answer)  # Remove any remaining \ followed by letters/numbers
+    answer = re.sub(r'\s+', ' ', answer)  # Normalize multiple spaces to single space
+    
+    # Clean up any remaining section references in parentheses
+    answer = re.sub(r'\([^)]*Section[^)]*\)', '', answer)
+    
+    # Ensure the answer is a single paragraph
+    answer = re.sub(r'\s+', ' ', answer)  # Normalize all whitespace to single spaces
+    answer = answer.strip()
+    
+    return answer
+
+def format_structured_response(answer):
+    """Format the response in a more structured and readable way."""
+    if not answer:
+        return "No information available in the document."
+    
+
+    # Remove any remaining markdown formatting
+    answer = re.sub(r'\*\*([^*]+)\*\*', r'\1', answer)  # Remove **bold** formatting
+    answer = re.sub(r'\*([^*]+)\*', r'\1', answer)  # Remove *italic* formatting
+    
+    # Remove section references
+    answer = re.sub(r'Section\s+\d+\.\d+\.\d+', '', answer)
+    answer = re.sub(r'Section\s+\d+\.\d+', '', answer)
+    answer = re.sub(r'Section\s+\d+', '', answer)
+    
+    # Remove all bullet points and convert to paragraph text
+    answer = re.sub(r'^\s*[-•]\s*', '', answer, flags=re.MULTILINE)  # Remove bullet points at start of lines
+    answer = re.sub(r'\s*•\s*', ' ', answer)  # Remove bullet points in middle of text
+    answer = re.sub(r'^\s*\d+\.\s*', '', answer, flags=re.MULTILINE)  # Remove numbered lists
+    answer = re.sub(r'^\s*[iiv]+\.\s*', '', answer, flags=re.MULTILINE)  # Remove roman numerals
+    
+    # Clean up any remaining section references in parentheses
+    answer = re.sub(r'\([^)]*Section[^)]*\)', '', answer)
+    
+    # Convert line breaks to spaces for paragraph format
+    answer = re.sub(r'\n', ' ', answer)
+    answer = re.sub(r'\s+', ' ', answer)  # Normalize multiple spaces to single space
+    
+    return answer.strip()
+
 # --- Helper Functions for the RAG Pipeline ---
 
 def download_pdf(url: str, save_path: str) -> bool:
@@ -142,8 +261,11 @@ def get_vector_store(text_chunks: list):
     setup_event_loop()
     
     try:
-        embeddings = MistralAIEmbeddings(model="mistral-embed")
-        vector_store = FAISS.from_documents(text_chunks, embedding=embeddings)
+        # Suppress warnings during embeddings creation
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            embeddings = MistralAIEmbeddings(model="mistral-embed")
+            vector_store = FAISS.from_documents(text_chunks, embedding=embeddings)
         return vector_store, True  # Return success flag
     except Exception as e:
         print(f"Failed to create vector store with Mistral embeddings: {e}")
@@ -152,23 +274,42 @@ def get_vector_store(text_chunks: list):
 def get_conversational_chain():
     """Creates a question-answering chain with a custom prompt and a Mistral LLM."""
     prompt_template = """
-      Answer the question based on the provided context. Keep your answer concise and relevant.
-    If the answer is not in the provided context, just say, "The answer is not available in the provided document".
-    Do not provide a wrong answer.
+You are an expert insurance policy analyst. Answer the question based strictly on the information provided in the context.
 
+**Instructions:**
+- Provide clear, formal, and concise answers suitable for an insurance policyholder
+- Use exact policy terms, durations, conditions, and limits mentioned in the context
+- Include all relevant eligibility criteria, exclusions, and sub-limits if applicable
+- If partial information is available, summarize it accurately without adding assumptions
+- For numerical values, use consistent formatting (e.g., "30 days" not "thirty days")
+- For policy terms, use the exact terminology from the document
+- If a specific limit or condition applies, state it clearly
+- DO NOT use section numbers or references (like "Section 3.1.15")
+- DO NOT use markdown formatting (no **bold** or *italic*)
+- Write responses in a natural, conversational tone as if explaining to a person
+- Make the response as short as possible and a summarized paragraph
 
-    Context:
-    {context}
+**Response Format Guidelines:**
+- Start with a direct answer to the question
+- Use simple, clear language without technical jargon
+- Highlight important numbers and time periods
+- Keep responses concise but comprehensive
+- Write as if explaining to a policyholder, not referencing document sections
+- Make the response as short as possible and a summarized paragraph
 
+Context:
+{context}
 
-    Question:
-    {question}
+Question:
+{question}
 
-
-    Answer:
-    """
+Answer:
+"""
     try:
-        model = ChatMistralAI(model="mistral-large-latest", temperature=0.3)
+        # Suppress warnings during model creation
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model = ChatMistralAI(model="mistral-large-latest", temperature=0.1)
         prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
         chain = prompt | model | StrOutputParser()
         return chain, True  # Return success flag
@@ -216,41 +357,6 @@ def process_request():
         # Limit number of questions to avoid rate limits
         if len(questions) > 10:  # Increased limit for Mistral
             return jsonify({"error": "Maximum 10 questions allowed per request to avoid rate limits."}), 400
-        
-        # --- TEST SAMPLE QUESTIONS/ANSWERS LOGIC ---
-        test_questions = [
-            "What is the grace period for premium payment under the National Parivar Mediclaim Plus Policy?",
-            "What is the waiting period for pre-existing diseases (PED) to be covered?",
-            "Does this policy cover maternity expenses, and what are the conditions?",
-            "What is the waiting period for cataract surgery?",
-            "Are the medical expenses for an organ donor covered under this policy?",
-            "What is the No Claim Discount (NCD) offered in this policy?",
-            "Is there a benefit for preventive health check-ups?",
-            "How does the policy define a 'Hospital'?",
-            "What is the extent of coverage for AYUSH treatments?",
-            "Are there any sub-limits on room rent and ICU charges for Plan A?"
-        ]
-        test_answers = [
-            "A grace period of thirty days is provided for premium payment after the due date to renew or continue the policy without losing continuity benefits.",
-            "There is a waiting period of thirty-six (36) months of continuous coverage from the first policy inception for pre-existing diseases and their direct complications to be covered.",
-            "Yes, the policy covers maternity expenses, including childbirth and lawful medical termination of pregnancy. To be eligible, the female insured person must have been continuously covered for at least 24 months. The benefit is limited to two deliveries or terminations during the policy period.",
-            "The policy has a specific waiting period of two (2) years for cataract surgery.",
-            "Yes, the policy indemnifies the medical expenses for the organ donor's hospitalization for the purpose of harvesting the organ, provided the organ is for an insured person and the donation complies with the Transplantation of Human Organs Act, 1994.",
-            "A No Claim Discount of 5% on the base premium is offered on renewal for a one-year policy term if no claims were made in the preceding year. The maximum aggregate NCD is capped at 5% of the total base premium.",
-            "Yes, the policy reimburses expenses for health check-ups at the end of every block of two continuous policy years, provided the policy has been renewed without a break. The amount is subject to the limits specified in the Table of Benefits.",
-            "A hospital is defined as an institution with at least 10 inpatient beds (in towns with a population below ten lakhs) or 15 beds (in all other places), with qualified nursing staff and medical practitioners available 24/7, a fully equipped operation theatre, and which maintains daily records of patients.",
-            "The policy covers medical expenses for inpatient treatment under Ayurveda, Yoga, Naturopathy, Unani, Siddha, and Homeopathy systems up to the Sum Insured limit, provided the treatment is taken in an AYUSH Hospital.",
-            "Yes, for Plan A, the daily room rent is capped at 1% of the Sum Insured, and ICU charges are capped at 2% of the Sum Insured. These limits do not apply if the treatment is for a listed procedure in a Preferred Provider Network (PPN)."
-        ]
-        test_q_to_a = dict(zip(test_questions, test_answers))
-        def normalize_question(q):
-            return ''.join(c for c in q.lower() if c not in string.punctuation).strip()
-        
-        normalized_test_q_to_a = {normalize_question(q): a for q, a in zip(test_questions, test_answers)}
-        normalized_input_questions = [normalize_question(q) for q in questions]
-        # If all questions are test questions (normalized), return all test answers and skip model pipeline
-        if all(q in normalized_test_q_to_a for q in normalized_input_questions):
-            return jsonify({"answers": [normalized_test_q_to_a[q] for q in normalized_input_questions]})
             
     except (ValueError, KeyError):
         return jsonify({"error": "Bad Request: 'documents' URL and a list of 'questions' are required."}), 400
@@ -273,22 +379,21 @@ def process_request():
         # Answer each question with rate limiting
         answers = []
         for i, question in enumerate(questions):
-            norm_q = normalize_question(question)
-            # If the question matches a test sample, use the test answer
-            if norm_q in normalized_test_q_to_a:
-                answers.append(normalized_test_q_to_a[norm_q])
-                continue
             try:
                 # Rate limiting between requests
                 if i > 0 and ai_available:
                     rate_limit()
+                
                 if ai_available and chain_available:
                     # Use AI-based search and answer generation
                     try:
                         docs = vector_store.similarity_search(question, k=3)
                         context = "\n\n".join([doc.page_content for doc in docs])
                         response = chain.invoke({"context": context, "question": question})
-                        answers.append(response)
+                        # Post-process the response for better formatting
+                        processed_response = post_process_answer(response)
+                        formatted_response = format_structured_response(processed_response)
+                        answers.append(formatted_response)
                     except Exception as e:
                         error_msg = str(e)
                         if "429" in error_msg or "quota" in error_msg.lower() or "rate" in error_msg.lower():
@@ -296,7 +401,9 @@ def process_request():
                             docs = simple_text_search(question, text_chunks)
                             context = "\n\n".join([doc.page_content for doc in docs])
                             answer = generate_simple_answer(question, context)
-                            answers.append(f"{answer} (Note: Using fallback mode due to API limits)")
+                            processed_answer = post_process_answer(answer)
+                            formatted_answer = format_structured_response(processed_answer)
+                            answers.append(f"{formatted_answer} (Note: Using fallback mode due to API limits)")
                         else:
                             answers.append(f"Error processing question: {error_msg}")
                 else:
@@ -304,7 +411,9 @@ def process_request():
                     docs = simple_text_search(question, text_chunks)
                     context = "\n\n".join([doc.page_content for doc in docs])
                     answer = generate_simple_answer(question, context)
-                    answers.append(f"{answer} (Note: Using fallback mode)")
+                    processed_answer = post_process_answer(answer)
+                    formatted_answer = format_structured_response(processed_answer)
+                    answers.append(f"{formatted_answer} (Note: Using fallback mode)")
                 
             except Exception as e:
                 error_msg = str(e)
